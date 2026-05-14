@@ -1,0 +1,318 @@
+# =================================================================
+#  GitHub Actions — Full CI/CD Pipeline
+#  Project : https://github.com/navaneethan0312/node.app
+#  Server  : 3.6.87.156 (emp.pem key)
+#  Stages  : lint → test → sonarqube → build → staging → production
+# =================================================================
+
+name: Node.js CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SERVER_IP: "13.233.208.28"
+  SERVER_USER: "ubuntu"
+  NODE_VERSION: "20"
+
+jobs:
+
+# =================================================================
+# STAGE 1 — LINT
+# Check code quality with ESLint before running anything else
+# =================================================================
+  lint:
+    name: "Stage 1 — Lint"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run ESLint
+        run: npm run lint
+
+
+# =================================================================
+# STAGE 2 — TEST + COVERAGE
+# Run Jest tests, generate coverage, enforce 80% gate
+# =================================================================
+  test:
+    name: "Stage 2 — Test & Coverage"
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run tests with coverage
+        run: npm test
+
+      - name: Check coverage threshold (80%)
+        run: |
+          COVERAGE=$(node -e "
+            const s = require('./coverage/coverage-summary.json');
+            console.log(s.total.lines.pct);
+          ")
+          echo "Coverage: ${COVERAGE}%"
+          node -e "
+            if (${COVERAGE} < 80) {
+              console.error('FAILED: Coverage ${COVERAGE}% is below 80%');
+              process.exit(1);
+            }
+            console.log('PASSED: Coverage ${COVERAGE}% meets threshold');
+          "
+
+      - name: Save coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 5
+
+
+# =================================================================
+# STAGE 3 — SONARQUBE ANALYSIS + QUALITY GATE
+# Static code analysis — blocks pipeline if quality gate fails
+# SonarQube runs on your server at http://3.6.87.156:9000
+# =================================================================
+  sonarqube:
+    name: "Stage 3 — SonarQube & Quality Gate"
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download coverage report
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarcloud-github-action@master
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+
+# =================================================================
+# STAGE 4 — BUILD
+# Package the app into a tar.gz for deployment
+# (No compile step needed — pure Node.js)
+# =================================================================
+  build:
+    name: "Stage 4 — Build & Package"
+    needs: sonarqube
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install production dependencies only
+        run: npm install --omit=dev
+
+      - name: Create deployment package
+        run: |
+          tar -czf app-package.tar.gz \
+            app.js \
+            package.json \
+            package-lock.json \
+            node_modules/
+          echo "Package size: $(du -sh app-package.tar.gz | cut -f1)"
+
+      - name: Upload deployment package
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-package
+          path: app-package.tar.gz
+          retention-days: 1
+
+
+# =================================================================
+# STAGE 5 — DEPLOY TO STAGING
+# SSH into 3.6.87.156, deploy app, run on port 3001
+# Runs on every push (PR preview + main)
+# =================================================================
+  deploy-staging:
+    name: "Stage 5 — Deploy Staging"
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: http://3.6.87.156:3001
+    steps:
+      - name: Download deployment package
+        uses: actions/download-artifact@v4
+        with:
+          name: app-package
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/emp.pem
+          chmod 400 ~/.ssh/emp.pem
+          ssh-keyscan -H ${{ env.SERVER_IP }} >> ~/.ssh/known_hosts
+
+      - name: Upload package to server
+        run: |
+          scp -i ~/.ssh/emp.pem app-package.tar.gz \
+            ${{ env.SERVER_USER }}@${{ env.SERVER_IP }}:/tmp/app-package.tar.gz
+
+      - name: Deploy on staging server
+        run: |
+          ssh -i ~/.ssh/emp.pem ${{ env.SERVER_USER }}@${{ env.SERVER_IP }} << 'ENDSSH'
+            set -e
+            echo "---- Deploying to STAGING ----"
+
+            # Create staging directory
+            mkdir -p /home/ubuntu/staging
+
+            # Extract new package
+            tar -xzf /tmp/app-package.tar.gz -C /home/ubuntu/staging
+
+            # Stop old staging process if running
+            pm2 delete node-app-staging 2>/dev/null || true
+
+            # Start app on port 3001
+            cd /home/ubuntu/staging
+            PORT=3001 pm2 start app.js --name node-app-staging
+            pm2 save
+
+            echo "---- Staging deploy complete ----"
+          ENDSSH
+
+      - name: Health check staging
+        run: |
+          echo "Waiting 8 seconds for app to start..."
+          sleep 8
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://${{ env.SERVER_IP }}:3001/health)
+          echo "Health check status: $HTTP_STATUS"
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "✅ Staging is healthy at http://${{ env.SERVER_IP }}:3001"
+          else
+            echo "❌ Health check failed with status: $HTTP_STATUS"
+            exit 1
+          fi
+
+
+# =================================================================
+# STAGE 6 — DEPLOY TO PRODUCTION
+# Only runs on push to main branch
+# Requires manual approval in GitHub Environments
+# Deploys on port 3000, with rollback on failure
+# =================================================================
+  deploy-production:
+    name: "Stage 6 — Deploy Production"
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment:
+      name: production
+      url: http://3.6.87.156:3000
+    steps:
+      - name: Download deployment package
+        uses: actions/download-artifact@v4
+        with:
+          name: app-package
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/emp.pem
+          chmod 400 ~/.ssh/emp.pem
+          ssh-keyscan -H ${{ env.SERVER_IP }} >> ~/.ssh/known_hosts
+
+      - name: Upload package to server
+        run: |
+          scp -i ~/.ssh/emp.pem app-package.tar.gz \
+            ${{ env.SERVER_USER }}@${{ env.SERVER_IP }}:/tmp/app-package.tar.gz
+
+      - name: Deploy on production server
+        run: |
+          ssh -i ~/.ssh/emp.pem ${{ env.SERVER_USER }}@${{ env.SERVER_IP }} << 'ENDSSH'
+            set -e
+            echo "---- Deploying to PRODUCTION ----"
+
+            # Backup current production for rollback
+            if [ -d /home/ubuntu/production ]; then
+              rm -rf /home/ubuntu/production-backup
+              cp -r /home/ubuntu/production /home/ubuntu/production-backup
+              echo "Backup created"
+            fi
+
+            # Deploy new version
+            mkdir -p /home/ubuntu/production
+            tar -xzf /tmp/app-package.tar.gz -C /home/ubuntu/production
+
+            # Restart production (zero-downtime reload)
+            cd /home/ubuntu/production
+            if pm2 describe node-app-prod > /dev/null 2>&1; then
+              pm2 reload node-app-prod
+            else
+              PORT=3000 pm2 start app.js --name node-app-prod
+            fi
+            pm2 save
+
+            echo "---- Production deploy complete ----"
+          ENDSSH
+
+      - name: Health check production
+        run: |
+          echo "Waiting 8 seconds..."
+          sleep 8
+          for i in 1 2 3; do
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://${{ env.SERVER_IP }}:3000/health)
+            echo "Attempt $i: $HTTP_STATUS"
+            if [ "$HTTP_STATUS" = "200" ]; then
+              echo "✅ Production is live at http://${{ env.SERVER_IP }}:3000"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "❌ Production health check failed — rolling back"
+          ssh -i ~/.ssh/emp.pem ${{ env.SERVER_USER }}@${{ env.SERVER_IP }} << 'ROLLBACK'
+            if [ -d /home/ubuntu/production-backup ]; then
+              rm -rf /home/ubuntu/production
+              mv /home/ubuntu/production-backup /home/ubuntu/production
+              cd /home/ubuntu/production
+              pm2 reload node-app-prod
+              echo "Rollback complete"
+            fi
+          ROLLBACK
