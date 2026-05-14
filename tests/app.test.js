@@ -3,7 +3,9 @@ const server = require('../app');
 const request = supertest(server);
 
 describe('Node App', () => {
-  afterAll((done) => server.close(done));
+  afterAll(() => {
+    server.close();
+});
 
   test('GET / returns 200 with HTML', async () => {
     const res = await request.get('/');
