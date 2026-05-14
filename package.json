@@ -4,6 +4,12 @@
   "main": "app.js",
   "scripts": {
     "start": "node app.js",
-    "test": "echo Test Successful"
+    "test": "jest --coverage --coverageReporters=lcov --coverageReporters=json-summary --coverageReporters=text",
+    "lint": "eslint app.js"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "eslint": "^8.57.0",
+    "supertest": "^7.0.0"
   }
 }
