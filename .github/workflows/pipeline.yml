@@ -242,9 +242,11 @@ jobs:
     needs: deploy-staging
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
     environment:
       name: production
       url: http://13.233.208.28:3000
+
     steps:
       - name: Download deployment package
         uses: actions/download-artifact@v4
@@ -255,14 +257,14 @@ jobs:
         run: |
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
-          echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/emp.pem
+          echo "${{ secrets.SERVER_SSH_KEY }}" | tr -d '\r' > ~/.ssh/emp.pem
           chmod 400 ~/.ssh/emp.pem
           ssh-keyscan -H ${{ env.SERVER_IP }} >> ~/.ssh/known_hosts
 
       - name: Upload package to server
         run: |
           scp -i ~/.ssh/emp.pem app-package.tar.gz \
-            ${{ env.SERVER_USER }}@${{ env.SERVER_IP }}:/tmp/app-package.tar.gz
+          ${{ env.SERVER_USER }}@${{ env.SERVER_IP }}:/tmp/app-package.tar.gz
 
       - name: Deploy on production server
         run: |
@@ -270,62 +272,59 @@ jobs:
             set -e
             echo "---- Deploying to PRODUCTION ----"
 
-            # Backup current production for rollback
             if [ -d /home/ubuntu/production ]; then
               rm -rf /home/ubuntu/production-backup
               cp -r /home/ubuntu/production /home/ubuntu/production-backup
               echo "Backup created"
             fi
 
-            # Deploy new version
             mkdir -p /home/ubuntu/production
             tar -xzf /tmp/app-package.tar.gz -C /home/ubuntu/production
 
-            # Restart production (zero-downtime reload)
             cd /home/ubuntu/production
             if pm2 describe node-app-prod > /dev/null 2>&1; then
               pm2 reload node-app-prod
             else
               PORT=3000 pm2 start app.js --name node-app-prod
             fi
-            pm2 save
 
+            pm2 save
             echo "---- Production deploy complete ----"
           ENDSSH
 
-   - name: Health check production
-  run: |
-    echo "Waiting for production to be ready..."
-    MAX_ATTEMPTS=15
-    ATTEMPT=0
-    
-    while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-      ATTEMPT=$((ATTEMPT + 1))
-      echo "Attempt $ATTEMPT/$MAX_ATTEMPTS..."
-      
-      HTTP_STATUS=$(curl -s -w "%{http_code}" -o /dev/null --max-time 10 \
-        http://${{ env.SERVER_IP }}:3000/health 2>/dev/null || echo "000")
-      
-      echo "Status: $HTTP_STATUS"
-      
-      if [ "$HTTP_STATUS" = "200" ]; then
-        echo "✅ Production is live at http://${{ env.SERVER_IP }}:3000"
-        exit 0
-      fi
-      
-      if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
-        sleep 10
-      fi
-    done
-    
-    echo "❌ Production health check failed after $MAX_ATTEMPTS attempts — rolling back"
-    ssh -i ~/.ssh/emp.pem ${{ env.SERVER_USER }}@${{ env.SERVER_IP }} << 'ROLLBACK'
-      if [ -d /home/ubuntu/production-backup ]; then
-        rm -rf /home/ubuntu/production
-        mv /home/ubuntu/production-backup /home/ubuntu/production
-        cd /home/ubuntu/production
-        pm2 reload node-app-prod
-        echo "Rollback complete"
-      fi
-    ROLLBACK
-    exit 1
+      - name: Health check production
+        run: |
+          echo "Waiting for production to be ready..."
+          MAX_ATTEMPTS=15
+          ATTEMPT=0
+
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS..."
+
+            HTTP_STATUS=$(curl -s -w "%{http_code}" -o /dev/null --max-time 10 \
+              http://${{ env.SERVER_IP }}:3000/health 2>/dev/null || echo "000")
+
+            echo "Status: $HTTP_STATUS"
+
+            if [ "$HTTP_STATUS" = "200" ]; then
+              echo "✅ Production is live at http://${{ env.SERVER_IP }}:3000"
+              exit 0
+            fi
+
+            if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
+              sleep 10
+            fi
+          done
+
+          echo "❌ Production health check failed after $MAX_ATTEMPTS attempts — rolling back"
+
+          ssh -i ~/.ssh/emp.pem ${{ env.SERVER_USER }}@${{ env.SERVER_IP }} << 'ROLLBACK'
+            if [ -d /home/ubuntu/production-backup ]; then
+              rm -rf /home/ubuntu/production
+              mv /home/ubuntu/production-backup /home/ubuntu/production
+              cd /home/ubuntu/production
+              pm2 reload node-app-prod
+              echo "Rollback complete"
+           fi
+          ROLLBACK
