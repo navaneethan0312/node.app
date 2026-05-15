@@ -293,26 +293,39 @@ jobs:
             echo "---- Production deploy complete ----"
           ENDSSH
 
-      - name: Health check production
-        run: |
-          echo "Waiting 8 seconds..."
-          sleep 8
-          for i in 1 2 3; do
-            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://${{ env.SERVER_IP }}:3000/health)
-            echo "Attempt $i: $HTTP_STATUS"
-            if [ "$HTTP_STATUS" = "200" ]; then
-              echo "✅ Production is live at http://${{ env.SERVER_IP }}:3000"
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "❌ Production health check failed — rolling back"
-          ssh -i ~/.ssh/emp.pem ${{ env.SERVER_USER }}@${{ env.SERVER_IP }} << 'ROLLBACK'
-            if [ -d /home/ubuntu/production-backup ]; then
-              rm -rf /home/ubuntu/production
-              mv /home/ubuntu/production-backup /home/ubuntu/production
-              cd /home/ubuntu/production
-              pm2 reload node-app-prod
-              echo "Rollback complete"
-            fi
-          ROLLBACK
+   - name: Health check production
+  run: |
+    echo "Waiting for production to be ready..."
+    MAX_ATTEMPTS=15
+    ATTEMPT=0
+    
+    while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+      ATTEMPT=$((ATTEMPT + 1))
+      echo "Attempt $ATTEMPT/$MAX_ATTEMPTS..."
+      
+      HTTP_STATUS=$(curl -s -w "%{http_code}" -o /dev/null --max-time 10 \
+        http://${{ env.SERVER_IP }}:3000/health 2>/dev/null || echo "000")
+      
+      echo "Status: $HTTP_STATUS"
+      
+      if [ "$HTTP_STATUS" = "200" ]; then
+        echo "✅ Production is live at http://${{ env.SERVER_IP }}:3000"
+        exit 0
+      fi
+      
+      if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
+        sleep 10
+      fi
+    done
+    
+    echo "❌ Production health check failed after $MAX_ATTEMPTS attempts — rolling back"
+    ssh -i ~/.ssh/emp.pem ${{ env.SERVER_USER }}@${{ env.SERVER_IP }} << 'ROLLBACK'
+      if [ -d /home/ubuntu/production-backup ]; then
+        rm -rf /home/ubuntu/production
+        mv /home/ubuntu/production-backup /home/ubuntu/production
+        cd /home/ubuntu/production
+        pm2 reload node-app-prod
+        echo "Rollback complete"
+      fi
+    ROLLBACK
+    exit 1
