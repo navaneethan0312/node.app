@@ -1,7 +1,7 @@
 # =================================================================
 #  GitHub Actions — Full CI/CD Pipeline
 #  Project : https://github.com/navaneethan0312/node.app
-#  Server  : 13.233.208.28 (emp.pem key)
+#  Server  : 13.206.102.45 (emp.pem key)
 #  Stages  : lint → test → sonarqube → build → staging → production
 # =================================================================
 
@@ -18,7 +18,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  SERVER_IP: "13.233.208.28"
+  SERVER_IP: "13.206.102.45"
   SERVER_USER: "ubuntu"
   NODE_VERSION: "20"
 
@@ -167,7 +167,7 @@ jobs:
 
 # =================================================================
 # STAGE 5 — DEPLOY TO STAGING
-# SSH into 3.6.87.156, deploy app, run on port 3001
+# SSH into 13.206.102.45, deploy app, run on port 3001
 # Runs on every push (PR preview + main)
 # =================================================================
   deploy-staging:
@@ -176,7 +176,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: staging
-      url: http://3.6.87.156:3001
+      url: http://13.206.102.45:3001
     steps:
       - name: Download deployment package
         uses: actions/download-artifact@v4
@@ -247,7 +247,7 @@ jobs:
 
     environment:
       name: production
-      url: http://13.233.208.28:3000
+      url: http://13.206.102.45:3000
 
     steps:
       - name: Download deployment package
